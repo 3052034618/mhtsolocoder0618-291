@@ -1,8 +1,10 @@
 import { create } from 'zustand';
 import { Notification, LeadStage, STAGE_CONFIG } from '@/types';
 import { mockNotifications } from '@/data/mockData';
-import { formatISO } from 'date-fns';
+import { formatISO, differenceInDays } from 'date-fns';
 import { useUserStore } from './useUserStore';
+
+const STORAGE_KEY = 'crm_notification_state_v1';
 
 interface NotificationState {
   notifications: Notification[];
@@ -15,14 +17,37 @@ interface NotificationState {
 
   notifyStageChange: (leadId: string, companyName: string, newStage: LeadStage, value: number) => void;
   notifyLost: (leadId: string, companyName: string, reason: string) => void;
-  notifyCooling: (leadId: string, companyName: string, days: number) => void;
+  notifyCooling: (leadId: string, companyName: string, days: number, ownerId: string, ownerName: string) => void;
+  resetToMock: () => void;
 }
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
+const loadInitialState = () => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      const notifications = parsed.notifications ?? mockNotifications;
+      return {
+        notifications,
+        unreadCount: notifications.filter((n: Notification) => !n.isRead).length,
+      };
+    }
+  } catch {
+    console.warn('Failed to load notification state from localStorage, using mock data');
+  }
+  return {
+    notifications: mockNotifications,
+    unreadCount: mockNotifications.filter(n => !n.isRead).length,
+  };
+};
+
+const initialData = loadInitialState();
+
 export const useNotificationStore = create<NotificationState>((set, get) => ({
-  notifications: mockNotifications,
-  unreadCount: mockNotifications.filter(n => !n.isRead).length,
+  notifications: initialData.notifications,
+  unreadCount: initialData.unreadCount,
 
   addNotification: (notification) => {
     const newNotif: Notification = {
@@ -61,7 +86,6 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   notifyStageChange: (leadId, companyName, newStage, value) => {
     const { addNotification } = get();
-    const currentUser = useUserStore.getState().currentUser;
     const stageName = STAGE_CONFIG[newStage].name;
 
     const managerUsers = useUserStore.getState().users.filter(u => u.role === 'manager');
@@ -74,9 +98,6 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
         relatedId: leadId,
       });
     });
-
-    if (currentUser?.role === 'manager') {
-    }
   },
 
   notifyLost: (leadId, companyName, reason) => {
@@ -94,19 +115,66 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     });
   },
 
-  notifyCooling: (leadId, companyName, days) => {
-    const { addNotification } = get();
-    const lead = useUserStore.getState();
-    const currentUser = useUserStore.getState().currentUser;
+  notifyCooling: (leadId, companyName, days, ownerId, ownerName) => {
+    const { addNotification, notifications } = get();
+    const now = new Date();
 
-    if (currentUser) {
+    const shouldNotify = (userId: string) => {
+      const recent = notifications.find(n =>
+        n.userId === userId &&
+        n.type === 'cooling' &&
+        n.relatedId === leadId &&
+        !n.isRead
+      );
+      if (recent) {
+        const daysSince = differenceInDays(now, new Date(recent.createdAt));
+        return daysSince >= 3;
+      }
+      return true;
+    };
+
+    if (shouldNotify(ownerId)) {
       addNotification({
-        userId: currentUser.id,
+        userId: ownerId,
         type: 'cooling',
-        title: '冷却线索提醒',
-        content: `${companyName} 已超过${days}天未跟进，请及时处理`,
+        title: '⚠ 冷却线索提醒',
+        content: `您负责的【${companyName}】已超过${days}天未跟进，请尽快处理避免流失！`,
         relatedId: leadId,
       });
     }
+
+    const managerUsers = useUserStore.getState().users.filter(u => u.role === 'manager');
+    managerUsers.forEach(manager => {
+      if (shouldNotify(manager.id)) {
+        addNotification({
+          userId: manager.id,
+          type: 'cooling',
+          title: '🔔 团队冷却预警',
+          content: `【${ownerName}】负责的【${companyName}】已超过${days}天未跟进，请督促处理`,
+          relatedId: leadId,
+        });
+      }
+    });
+  },
+
+  resetToMock: () => {
+    localStorage.removeItem(STORAGE_KEY);
+    set({
+      notifications: mockNotifications,
+      unreadCount: mockNotifications.filter(n => !n.isRead).length,
+    });
   },
 }));
+
+useNotificationStore.subscribe((state, prevState) => {
+  try {
+    const changed = state.notifications !== prevState.notifications;
+    if (changed) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        notifications: state.notifications,
+      }));
+    }
+  } catch {
+    console.warn('Failed to save notification state to localStorage');
+  }
+});

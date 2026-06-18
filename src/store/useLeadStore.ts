@@ -14,8 +14,11 @@ import {
 import { mockLeads, mockCommunications, mockStageHistories, mockCustomers } from '@/data/mockData';
 import { differenceInDays, formatISO } from 'date-fns';
 import { useUserStore } from './useUserStore';
+import { useNotificationStore } from './useNotificationStore';
+import { useGoalStore } from './useGoalStore';
 
 const COOLING_THRESHOLD_DAYS = 7;
+const STORAGE_KEY = 'crm_lead_state_v1';
 
 interface LeadState {
   leads: Lead[];
@@ -46,15 +49,43 @@ interface LeadState {
   getFunnelData: () => FunnelData[];
   getStageDurations: () => StageDuration[];
   getDealsByMonth: (months: number) => { month: string; value: number; count: number }[];
+  getDealCycleDistribution: () => { name: string; min: number; max: number; count: number; value: number }[];
+  getAverageDealCycle: () => { avgDays: number; medianDays: number; totalCount: number };
+  resetToMock: () => void;
 }
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
+const loadInitialState = () => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return {
+        leads: parsed.leads ?? mockLeads,
+        communications: parsed.communications ?? mockCommunications,
+        stageHistories: parsed.stageHistories ?? mockStageHistories,
+        customers: parsed.customers ?? mockCustomers,
+      };
+    }
+  } catch {
+    console.warn('Failed to load lead state from localStorage, using mock data');
+  }
+  return {
+    leads: mockLeads,
+    communications: mockCommunications,
+    stageHistories: mockStageHistories,
+    customers: mockCustomers,
+  };
+};
+
+const initialData = loadInitialState();
+
 export const useLeadStore = create<LeadState>((set, get) => ({
-  leads: mockLeads,
-  communications: mockCommunications,
-  stageHistories: mockStageHistories,
-  customers: mockCustomers,
+  leads: initialData.leads,
+  communications: initialData.communications,
+  stageHistories: initialData.stageHistories,
+  customers: initialData.customers,
   selectedSource: null,
   selectedOwner: null,
   searchQuery: '',
@@ -151,6 +182,10 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       ),
       stageHistories: [...state.stageHistories, newHistory],
     }));
+
+    if (newStage === 'won') {
+      useGoalStore.getState().addDealAmount(lead.ownerId, now, lead.value);
+    }
   },
 
   addCommunication: (leadId, type, content) => {
@@ -197,12 +232,36 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       createdAt: now,
     };
 
+    const lastHistory = get().stageHistories
+      .filter(s => s.leadId === leadId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+    const durationDays = lastHistory
+      ? differenceInDays(new Date(now), new Date(lastHistory.createdAt))
+      : differenceInDays(new Date(now), new Date(lead.createdAt));
+
+    const currentUser = useUserStore.getState().currentUser;
+
+    const newHistory: StageHistory = {
+      id: `sh-${generateId()}`,
+      leadId,
+      fromStage: lead.stage,
+      toStage: 'won',
+      operatorId: currentUser?.id || 'user-1',
+      operatorName: currentUser?.name || '未知',
+      createdAt: now,
+      durationDays,
+    };
+
     set(state => ({
       customers: [newCustomer, ...state.customers],
+      stageHistories: [...state.stageHistories, newHistory],
       leads: state.leads.map(l =>
         l.id === leadId ? { ...l, stage: 'won' as LeadStage, updatedAt: now } : l
       ),
     }));
+
+    useGoalStore.getState().addDealAmount(lead.ownerId, now, lead.value);
   },
 
   markAsLost: (leadId, _reason) => {
@@ -241,6 +300,9 @@ export const useLeadStore = create<LeadState>((set, get) => ({
   checkCoolingLeads: () => {
     const now = new Date();
     const activeStages: LeadStage[] = ['initial', 'requirement', 'proposal', 'negotiation'];
+    const notifyCooling = useNotificationStore.getState().notifyCooling;
+
+    const newlyCoolingLeads: { leadId: string; companyName: string; days: number; ownerId: string; ownerName: string }[] = [];
 
     set(state => ({
       leads: state.leads.map(lead => {
@@ -249,11 +311,24 @@ export const useLeadStore = create<LeadState>((set, get) => ({
         }
         const daysSinceFollowUp = differenceInDays(now, new Date(lead.lastFollowUpAt));
         if (daysSinceFollowUp >= COOLING_THRESHOLD_DAYS) {
+          if (!lead.isCooling) {
+            newlyCoolingLeads.push({
+              leadId: lead.id,
+              companyName: lead.companyName,
+              days: daysSinceFollowUp,
+              ownerId: lead.ownerId,
+              ownerName: lead.ownerName,
+            });
+          }
           return { ...lead, isCooling: true, coolingDays: daysSinceFollowUp };
         }
         return { ...lead, isCooling: false, coolingDays: 0 };
       }),
     }));
+
+    newlyCoolingLeads.forEach(item => {
+      notifyCooling(item.leadId, item.companyName, item.days, item.ownerId, item.ownerName);
+    });
   },
 
   getFunnelData: () => {
@@ -284,19 +359,52 @@ export const useLeadStore = create<LeadState>((set, get) => ({
   },
 
   getStageDurations: () => {
-    const { stageHistories } = get();
+    const { stageHistories, leads } = get();
     const result: StageDuration[] = [];
 
     const activeStages: LeadStage[] = ['initial', 'requirement', 'proposal', 'negotiation'];
+    const now = new Date();
 
     activeStages.forEach(stage => {
-      const histories = stageHistories.filter(s => s.toStage === stage && s.durationDays !== undefined);
-      const durations = histories.map(s => s.durationDays as number);
+      const perLeadDurations: number[] = [];
 
-      if (durations.length > 0) {
-        const avgDays = Math.round(durations.reduce((a, b) => a + b, 0) / durations.length * 10) / 10;
-        const minDays = Math.min(...durations);
-        const maxDays = Math.max(...durations);
+      leads.forEach(lead => {
+        const leadHistories = stageHistories
+          .filter(s => s.leadId === lead.id)
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+        const enterStage = leadHistories.find(s => s.toStage === stage);
+        const stageIndex = STAGE_ORDER.indexOf(stage);
+        const nextStage = STAGE_ORDER.slice(stageIndex + 1).find(s => s !== 'lost');
+
+        const exitStage = nextStage
+          ? leadHistories.find(s => s.toStage === nextStage || s.toStage === 'lost')
+          : undefined;
+
+        let duration: number | undefined = undefined;
+        if (enterStage) {
+          if (exitStage) {
+            duration = differenceInDays(new Date(exitStage.createdAt), new Date(enterStage.createdAt));
+          } else if (lead.stage === stage) {
+            duration = differenceInDays(now, new Date(enterStage.createdAt));
+          }
+        }
+
+        if (duration !== undefined && duration >= 0) {
+          perLeadDurations.push(duration);
+        }
+      });
+
+      const fromHistories = stageHistories
+        .filter(s => s.toStage === stage && s.durationDays !== undefined)
+        .map(s => s.durationDays as number);
+
+      const allDurations = [...perLeadDurations, ...fromHistories];
+
+      if (allDurations.length > 0) {
+        const avgDays = Math.round(allDurations.reduce((a, b) => a + b, 0) / allDurations.length * 10) / 10;
+        const minDays = Math.min(...allDurations);
+        const maxDays = Math.max(...allDurations);
 
         result.push({
           stage,
@@ -317,6 +425,83 @@ export const useLeadStore = create<LeadState>((set, get) => ({
     });
 
     return result;
+  },
+
+  getDealCycleDistribution: () => {
+    const { leads, stageHistories } = get();
+    const buckets = [
+      { name: '0-7天', min: 0, max: 7, count: 0, value: 0 },
+      { name: '8-14天', min: 8, max: 14, count: 0, value: 0 },
+      { name: '15-30天', min: 15, max: 30, count: 0, value: 0 },
+      { name: '31-60天', min: 31, max: 60, count: 0, value: 0 },
+      { name: '61-90天', min: 61, max: 90, count: 0, value: 0 },
+      { name: '90天以上', min: 91, max: Infinity, count: 0, value: 0 },
+    ];
+
+    leads.filter(l => l.stage === 'won').forEach(lead => {
+      const wonHistory = stageHistories
+        .filter(s => s.leadId === lead.id && s.toStage === 'won')
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+      const endDate = wonHistory ? new Date(wonHistory.createdAt) : new Date(lead.updatedAt);
+      const startDate = new Date(lead.createdAt);
+      const totalDays = differenceInDays(endDate, startDate);
+
+      const bucket = buckets.find(b => totalDays >= b.min && totalDays <= b.max);
+      if (bucket) {
+        bucket.count++;
+        bucket.value += lead.value;
+      }
+    });
+
+    const wonLeads = leads.filter(l => l.stage === 'won');
+    const wonStageHistories = stageHistories.filter(s => s.toStage === 'won');
+
+    wonStageHistories.forEach(sh => {
+      if (wonLeads.find(l => l.id === sh.leadId)) return;
+      const lead = leads.find(l => l.id === sh.leadId);
+      if (!lead) return;
+      const totalDays = differenceInDays(new Date(sh.createdAt), new Date(lead.createdAt));
+      const bucket = buckets.find(b => totalDays >= b.min && totalDays <= b.max);
+      if (bucket) {
+        bucket.count++;
+        bucket.value += lead.value;
+      }
+    });
+
+    return buckets;
+  },
+
+  getAverageDealCycle: () => {
+    const { leads, stageHistories } = get();
+    const cycles: number[] = [];
+
+    const wonStageHistories = stageHistories.filter(s => s.toStage === 'won');
+    wonStageHistories.forEach(sh => {
+      const lead = leads.find(l => l.id === sh.leadId);
+      if (lead) {
+        const days = differenceInDays(new Date(sh.createdAt), new Date(lead.createdAt));
+        if (days > 0) cycles.push(days);
+      }
+    });
+
+    leads.filter(l => l.stage === 'won').forEach(lead => {
+      const hasHistory = wonStageHistories.some(s => s.leadId === lead.id);
+      if (!hasHistory) {
+        const days = differenceInDays(new Date(lead.updatedAt), new Date(lead.createdAt));
+        if (days > 0) cycles.push(days);
+      }
+    });
+
+    if (cycles.length === 0) return { avgDays: 0, medianDays: 0, totalCount: 0 };
+
+    const sorted = [...cycles].sort((a, b) => a - b);
+    const avgDays = Math.round(sorted.reduce((a, b) => a + b, 0) / sorted.length * 10) / 10;
+    const medianDays = sorted.length % 2 === 0
+      ? Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2 * 10) / 10
+      : sorted[Math.floor(sorted.length / 2)];
+
+    return { avgDays, medianDays, totalCount: sorted.length };
   },
 
   getDealsByMonth: (months) => {
@@ -342,4 +527,35 @@ export const useLeadStore = create<LeadState>((set, get) => ({
 
     return result;
   },
+
+  resetToMock: () => {
+    localStorage.removeItem(STORAGE_KEY);
+    set({
+      leads: mockLeads,
+      communications: mockCommunications,
+      stageHistories: mockStageHistories,
+      customers: mockCustomers,
+    });
+  },
 }));
+
+useLeadStore.subscribe((state, prevState) => {
+  try {
+    const changed =
+      state.leads !== prevState.leads ||
+      state.communications !== prevState.communications ||
+      state.stageHistories !== prevState.stageHistories ||
+      state.customers !== prevState.customers;
+
+    if (changed) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        leads: state.leads,
+        communications: state.communications,
+        stageHistories: state.stageHistories,
+        customers: state.customers,
+      }));
+    }
+  } catch {
+    console.warn('Failed to save lead state to localStorage');
+  }
+});

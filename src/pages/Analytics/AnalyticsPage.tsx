@@ -12,22 +12,32 @@ import {
   Cell,
   LineChart,
   Line,
+  Legend,
 } from 'recharts';
-import { TrendingUp, Clock, Users, DollarSign, BarChart3, Target } from 'lucide-react';
+import {
+  TrendingUp,
+  Clock,
+  Users,
+  DollarSign,
+  BarChart3,
+  Target,
+  CalendarRange,
+  Gauge,
+} from 'lucide-react';
 import { useLeadStore } from '@/store/useLeadStore';
 import { useUserStore } from '@/store/useUserStore';
-import { useGoalStore } from '@/store/useGoalStore';
-import { STAGE_CONFIG, SOURCE_CONFIG } from '@/types';
+import { SOURCE_CONFIG } from '@/types';
 import { formatCurrency } from '@/utils/format';
 
 export function AnalyticsPage() {
   const funnelData = useLeadStore(state => state.getFunnelData());
   const stageDurations = useLeadStore(state => state.getStageDurations());
   const dealsByMonth = useLeadStore(state => state.getDealsByMonth(6));
+  const dealCycleDistribution = useLeadStore(state => state.getDealCycleDistribution());
+  const averageDealCycle = useLeadStore(state => state.getAverageDealCycle());
   const leads = useLeadStore(state => state.leads);
   const customers = useLeadStore(state => state.customers);
   const users = useUserStore(state => state.users);
-  const goals = useGoalStore(state => state.goals);
 
   const [selectedPeriod, setSelectedPeriod] = useState<'month' | 'quarter' | 'year'>('month');
 
@@ -71,16 +81,15 @@ export function AnalyticsPage() {
     const wonLeads = leads.filter(l => l.stage === 'won').length;
     const lostLeads = leads.filter(l => l.stage === 'lost').length;
     const totalValue = customers.reduce((sum, c) => sum + c.dealValue, 0);
-    const avgDealValue = customers.length > 0 ? totalValue / customers.length : 0;
-    const winRate = totalLeads > 0 ? (wonLeads / (wonLeads + lostLeads)) * 100 : 0;
+    const winRate = totalLeads > 0 ? (wonLeads / Math.max((wonLeads + lostLeads), 1)) * 100 : 0;
 
     return [
-      { label: '总线索数', value: totalLeads, icon: Users, color: 'text-blue-600', bgColor: 'bg-blue-50' },
-      { label: '成交客户', value: customers.length, icon: TrendingUp, color: 'text-green-600', bgColor: 'bg-green-50' },
-      { label: '总成交额', value: formatCurrency(totalValue), icon: DollarSign, color: 'text-accent-600', bgColor: 'bg-accent-50' },
-      { label: '成交率', value: `${Math.round(winRate)}%`, icon: Target, color: 'text-purple-600', bgColor: 'bg-purple-50' },
+      { label: '总线索数', value: totalLeads, icon: Users, color: 'text-blue-600', bgColor: 'bg-blue-50', trend: '↑ 12%' },
+      { label: '成交客户', value: customers.length, icon: TrendingUp, color: 'text-green-600', bgColor: 'bg-green-50', trend: '↑ 8%' },
+      { label: '总成交额', value: formatCurrency(totalValue), icon: DollarSign, color: 'text-accent-600', bgColor: 'bg-accent-50', trend: '↑ 15%' },
+      { label: '平均成交周期', value: `${averageDealCycle.avgDays}天`, icon: CalendarRange, color: 'text-purple-600', bgColor: 'bg-purple-50', trend: `中位数 ${averageDealCycle.medianDays}天` },
     ];
-  }, [leads, customers]);
+  }, [leads, customers, averageDealCycle]);
 
   const COLORS = ['#FF6B35', '#8B5CF6', '#10B981', '#3B82F6', '#F59E0B'];
 
@@ -99,11 +108,21 @@ export function AnalyticsPage() {
     最长: d.maxDays,
   }));
 
+  const cycleChartData = dealCycleDistribution.map(d => ({
+    name: d.name,
+    成交单数: d.count,
+    金额万元: Math.round(d.value / 10000 * 10) / 10,
+  }));
+
   const monthlyDealsData = dealsByMonth.map(d => ({
     name: d.month,
     成交金额: d.value / 10000,
     成交数: d.count,
   }));
+
+  const totalDealsInCycle = dealCycleDistribution.reduce((sum, b) => sum + b.count, 0);
+  const maxCycleBucket = dealCycleDistribution.reduce((max, b) => b.count > max.count ? b : max, dealCycleDistribution[0]);
+  const peakPercentage = totalDealsInCycle > 0 ? Math.round(maxCycleBucket.count / totalDealsInCycle * 100) : 0;
 
   return (
     <div className="h-screen flex flex-col">
@@ -112,7 +131,7 @@ export function AnalyticsPage() {
           <div>
             <h1 className="text-xl font-bold text-slate-900">数据分析</h1>
             <p className="text-sm text-slate-500 mt-0.5">
-              全团队线索漏斗与转化分析
+              全团队线索漏斗与转化分析 · 共 {averageDealCycle.totalCount} 条成交样本
             </p>
           </div>
 
@@ -152,9 +171,7 @@ export function AnalyticsPage() {
                   <div className={`w-10 h-10 rounded-xl ${stat.bgColor} flex items-center justify-center`}>
                     <Icon className={`w-5 h-5 ${stat.color}`} />
                   </div>
-                  <span className="text-xs text-slate-400">
-                    {index % 2 === 0 ? '↑ 12%' : '↑ 8%'}
-                  </span>
+                  <span className="text-xs text-slate-400">{stat.trend}</span>
                 </div>
                 <p className="text-2xl font-bold text-slate-900">{stat.value}</p>
                 <p className="text-sm text-slate-500 mt-1">{stat.label}</p>
@@ -256,7 +273,7 @@ export function AnalyticsPage() {
           <div className="col-span-2 card p-6">
             <h3 className="font-semibold text-slate-900 mb-6 flex items-center gap-2">
               <Clock className="w-5 h-5 text-accent-600" />
-              各阶段停留时长
+              各阶段停留时长（基于实际线索停留）
             </h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
@@ -271,7 +288,10 @@ export function AnalyticsPage() {
                       boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
                     }}
                   />
-                  <Bar dataKey="平均天数" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
+                  <Legend />
+                  <Bar dataKey="平均天数" name="平均" fill="#8B5CF6" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="最长" name="最长" fill="#C4B5FD" radius={[6, 6, 0, 0]} />
+                  <Bar dataKey="最短" name="最短" fill="#A78BFA" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -317,6 +337,98 @@ export function AnalyticsPage() {
           </div>
         </div>
 
+        <div className="grid grid-cols-3 gap-5 mb-6">
+          <div className="col-span-2 card p-6">
+            <div className="flex items-start justify-between mb-6">
+              <div>
+                <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                  <CalendarRange className="w-5 h-5 text-accent-600" />
+                  成交周期分布
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">从线索创建到成交的天数区间分布，识别销售效率瓶颈</p>
+              </div>
+              {totalDealsInCycle > 0 && (
+                <div className="text-right">
+                  <p className="text-xs text-slate-500">集中区间</p>
+                  <p className="text-sm font-bold text-accent-600">
+                    {maxCycleBucket.name} · {peakPercentage}%
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={cycleChartData} barSize={50}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke="#94a3b8" />
+                  <YAxis yAxisId="left" tick={{ fontSize: 12 }} stroke="#94a3b8" />
+                  <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} stroke="#94a3b8" unit="万" />
+                  <Tooltip
+                    contentStyle={{
+                      borderRadius: '8px',
+                      border: '1px solid #e2e8f0',
+                      boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
+                    }}
+                  />
+                  <Legend />
+                  <Bar yAxisId="left" dataKey="成交单数" name="成交单数" fill="#FF6B35" radius={[6, 6, 0, 0]} />
+                  <Bar yAxisId="right" dataKey="金额万元" name="金额(万元)" fill="#10B981" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="card p-6 bg-gradient-to-br from-primary-950 to-primary-800 text-white">
+            <h3 className="font-semibold mb-5 flex items-center gap-2">
+              <Gauge className="w-5 h-5 text-accent-400" />
+              成交周期洞察
+            </h3>
+            <div className="space-y-5">
+              <div className="bg-white/10 rounded-xl p-4 backdrop-blur-sm">
+                <p className="text-primary-200 text-xs mb-1">平均成交周期</p>
+                <p className="text-3xl font-bold">{averageDealCycle.avgDays} <span className="text-lg">天</span></p>
+                <div className="mt-2 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-accent-400 to-accent-600 rounded-full transition-all duration-1000"
+                    style={{ width: `${Math.min(averageDealCycle.avgDays / 60 * 100, 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="bg-white/10 rounded-xl p-4 backdrop-blur-sm">
+                <p className="text-primary-200 text-xs mb-1">中位数周期</p>
+                <p className="text-2xl font-bold">{averageDealCycle.medianDays} <span className="text-base">天</span></p>
+                <p className="text-xs text-primary-300 mt-1">
+                  {averageDealCycle.medianDays <= 30 ? '✓ 效率优秀，多数在1个月内成交' :
+                   averageDealCycle.medianDays <= 60 ? '⚡ 正常水平，1-2个月成交' :
+                   '⚠ 周期偏长，建议优化流程'}
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                {dealCycleDistribution.filter(b => b.count > 0).slice(0, 3).map((bucket, i) => (
+                  <div key={bucket.name}>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-primary-200">{bucket.name}</span>
+                      <span className="text-white font-medium">
+                        {bucket.count}单 · {totalDealsInCycle > 0 ? Math.round(bucket.count / totalDealsInCycle * 100) : 0}%
+                      </span>
+                    </div>
+                    <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${
+                          i === 0 ? 'bg-accent-400' : i === 1 ? 'bg-purple-400' : 'bg-emerald-400'
+                        }`}
+                        style={{ width: `${totalDealsInCycle > 0 ? (bucket.count / totalDealsInCycle * 100) : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="card p-6">
           <h3 className="font-semibold text-slate-900 mb-6 flex items-center gap-2">
             <DollarSign className="w-5 h-5 text-accent-600" />
@@ -327,7 +439,8 @@ export function AnalyticsPage() {
               <LineChart data={monthlyDealsData}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke="#94a3b8" />
-                <YAxis tick={{ fontSize: 12 }} stroke="#94a3b8" unit="万" />
+                <YAxis yAxisId="left" tick={{ fontSize: 12 }} stroke="#94a3b8" unit="万" />
+                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} stroke="#94a3b8" unit="单" />
                 <Tooltip
                   contentStyle={{
                     borderRadius: '8px',
@@ -335,13 +448,26 @@ export function AnalyticsPage() {
                     boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
                   }}
                 />
+                <Legend />
                 <Line
+                  yAxisId="left"
                   type="monotone"
                   dataKey="成交金额"
+                  name="成交金额(万元)"
                   stroke="#FF6B35"
                   strokeWidth={3}
                   dot={{ fill: '#FF6B35', strokeWidth: 2, r: 4 }}
                   activeDot={{ r: 6, fill: '#FF6B35' }}
+                />
+                <Line
+                  yAxisId="right"
+                  type="monotone"
+                  dataKey="成交数"
+                  name="成交数"
+                  stroke="#8B5CF6"
+                  strokeWidth={2}
+                  strokeDasharray="5 5"
+                  dot={{ fill: '#8B5CF6', strokeWidth: 2, r: 3 }}
                 />
               </LineChart>
             </ResponsiveContainer>
