@@ -28,40 +28,117 @@ import { useLeadStore } from '@/store/useLeadStore';
 import { useUserStore } from '@/store/useUserStore';
 import { SOURCE_CONFIG } from '@/types';
 import { formatCurrency } from '@/utils/format';
+import { startOfMonth, startOfQuarter, startOfYear, endOfMonth, endOfQuarter, endOfYear, format } from 'date-fns';
+import { zhCN } from 'date-fns/locale';
 
 export function AnalyticsPage() {
-  const funnelData = useLeadStore(state => state.getFunnelData());
-  const stageDurations = useLeadStore(state => state.getStageDurations());
-  const dealsByMonth = useLeadStore(state => state.getDealsByMonth(6));
-  const dealCycleDistribution = useLeadStore(state => state.getDealCycleDistribution());
-  const averageDealCycle = useLeadStore(state => state.getAverageDealCycle());
+  const getFunnelData = useLeadStore(state => state.getFunnelData);
+  const getStageDurations = useLeadStore(state => state.getStageDurations);
+  const getDealsByMonth = useLeadStore(state => state.getDealsByMonth);
+  const getDealCycleDistribution = useLeadStore(state => state.getDealCycleDistribution);
+  const getAverageDealCycle = useLeadStore(state => state.getAverageDealCycle);
   const leads = useLeadStore(state => state.leads);
   const customers = useLeadStore(state => state.customers);
   const users = useUserStore(state => state.users);
 
   const [selectedPeriod, setSelectedPeriod] = useState<'month' | 'quarter' | 'year'>('month');
 
+  const periodRange = useMemo(() => {
+    const now = new Date();
+    let start: Date;
+    let end: Date;
+    let months: number;
+
+    switch (selectedPeriod) {
+      case 'month':
+        start = startOfMonth(now);
+        end = endOfMonth(now);
+        months = 1;
+        break;
+      case 'quarter':
+        start = startOfQuarter(now);
+        end = endOfQuarter(now);
+        months = 3;
+        break;
+      case 'year':
+        start = startOfYear(now);
+        end = endOfYear(now);
+        months = 12;
+        break;
+      default:
+        start = startOfMonth(now);
+        end = endOfMonth(now);
+        months = 1;
+    }
+
+    return {
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+      months,
+      label: format(start, 'yyyy年M月d日', { locale: zhCN }) + ' - ' + format(end, 'M月d日', { locale: zhCN }),
+    };
+  }, [selectedPeriod]);
+
+  const funnelData = useMemo(
+    () => getFunnelData({ startDate: periodRange.startDate, endDate: periodRange.endDate }),
+    [getFunnelData, periodRange]
+  );
+
+  const stageDurations = useMemo(
+    () => getStageDurations({ startDate: periodRange.startDate, endDate: periodRange.endDate }),
+    [getStageDurations, periodRange]
+  );
+
+  const dealsByMonth = useMemo(
+    () => getDealsByMonth(periodRange.months),
+    [getDealsByMonth, periodRange]
+  );
+
+  const dealCycleDistribution = useMemo(
+    () => getDealCycleDistribution({ startDate: periodRange.startDate, endDate: periodRange.endDate }),
+    [getDealCycleDistribution, periodRange]
+  );
+
+  const averageDealCycle = useMemo(
+    () => getAverageDealCycle({ startDate: periodRange.startDate, endDate: periodRange.endDate }),
+    [getAverageDealCycle, periodRange]
+  );
+
+  const periodLeads = useMemo(() => {
+    return leads.filter(lead => {
+      const createdAt = new Date(lead.createdAt);
+      return createdAt >= new Date(periodRange.startDate) && createdAt <= new Date(periodRange.endDate);
+    });
+  }, [leads, periodRange]);
+
+  const periodCustomers = useMemo(() => {
+    return customers.filter(customer => {
+      const dealDate = new Date(customer.dealDate);
+      return dealDate >= new Date(periodRange.startDate) && dealDate <= new Date(periodRange.endDate);
+    });
+  }, [customers, periodRange]);
+
   const sourceDistribution = useMemo(() => {
     const sources: Record<string, { name: string; value: number; color: string }> = {};
     Object.entries(SOURCE_CONFIG).forEach(([key, config]) => {
       sources[key] = { name: config.name, value: 0, color: key === 'website' ? '#0EA5E9' : key === 'exhibition' ? '#8B5CF6' : '#10B981' };
     });
-    leads.forEach(lead => {
+    periodLeads.forEach(lead => {
       if (sources[lead.source]) {
         sources[lead.source].value++;
       }
     });
     return Object.values(sources);
-  }, [leads]);
+  }, [periodLeads]);
 
   const salesRanking = useMemo(() => {
     const ranking = users
       .filter(u => u.role === 'sales')
       .map(user => {
-        const userCustomers = customers.filter(c => c.ownerId === user.id);
+        const userCustomers = periodCustomers.filter(c => c.ownerId === user.id);
         const totalValue = userCustomers.reduce((sum, c) => sum + c.dealValue, 0);
         const dealCount = userCustomers.length;
-        const userLeads = leads.filter(l => l.ownerId === user.id);
+        const userLeads = periodLeads.filter(l => l.ownerId === user.id);
         const conversionRate = userLeads.length > 0 ? (dealCount / userLeads.length) * 100 : 0;
         return {
           id: user.id,
@@ -74,22 +151,22 @@ export function AnalyticsPage() {
       })
       .sort((a, b) => b.totalValue - a.totalValue);
     return ranking;
-  }, [users, customers, leads]);
+  }, [users, periodCustomers, periodLeads]);
 
   const stats = useMemo(() => {
-    const totalLeads = leads.length;
-    const wonLeads = leads.filter(l => l.stage === 'won').length;
-    const lostLeads = leads.filter(l => l.stage === 'lost').length;
-    const totalValue = customers.reduce((sum, c) => sum + c.dealValue, 0);
+    const totalLeads = periodLeads.length;
+    const wonLeads = periodLeads.filter(l => l.stage === 'won').length;
+    const lostLeads = periodLeads.filter(l => l.stage === 'lost').length;
+    const totalValue = periodCustomers.reduce((sum, c) => sum + c.dealValue, 0);
     const winRate = totalLeads > 0 ? (wonLeads / Math.max((wonLeads + lostLeads), 1)) * 100 : 0;
 
     return [
-      { label: '总线索数', value: totalLeads, icon: Users, color: 'text-blue-600', bgColor: 'bg-blue-50', trend: '↑ 12%' },
-      { label: '成交客户', value: customers.length, icon: TrendingUp, color: 'text-green-600', bgColor: 'bg-green-50', trend: '↑ 8%' },
-      { label: '总成交额', value: formatCurrency(totalValue), icon: DollarSign, color: 'text-accent-600', bgColor: 'bg-accent-50', trend: '↑ 15%' },
+      { label: '新增线索', value: totalLeads, icon: Users, color: 'text-blue-600', bgColor: 'bg-blue-50', trend: '本期新增' },
+      { label: '成交客户', value: periodCustomers.length, icon: TrendingUp, color: 'text-green-600', bgColor: 'bg-green-50', trend: '本期成交' },
+      { label: '总成交额', value: formatCurrency(totalValue), icon: DollarSign, color: 'text-accent-600', bgColor: 'bg-accent-50', trend: '本期累计' },
       { label: '平均成交周期', value: `${averageDealCycle.avgDays}天`, icon: CalendarRange, color: 'text-purple-600', bgColor: 'bg-purple-50', trend: `中位数 ${averageDealCycle.medianDays}天` },
     ];
-  }, [leads, customers, averageDealCycle]);
+  }, [periodLeads, periodCustomers, averageDealCycle]);
 
   const COLORS = ['#FF6B35', '#8B5CF6', '#10B981', '#3B82F6', '#F59E0B'];
 
@@ -131,7 +208,7 @@ export function AnalyticsPage() {
           <div>
             <h1 className="text-xl font-bold text-slate-900">数据分析</h1>
             <p className="text-sm text-slate-500 mt-0.5">
-              全团队线索漏斗与转化分析 · 共 {averageDealCycle.totalCount} 条成交样本
+              {periodRange.label} · 共 {averageDealCycle.totalCount} 条成交样本
             </p>
           </div>
 

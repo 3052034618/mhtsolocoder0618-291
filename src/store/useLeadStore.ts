@@ -46,11 +46,11 @@ interface LeadState {
   markAsLost: (leadId: string, reason: string) => void;
 
   checkCoolingLeads: () => void;
-  getFunnelData: () => FunnelData[];
-  getStageDurations: () => StageDuration[];
+  getFunnelData: (options?: { startDate?: string; endDate?: string }) => FunnelData[];
+  getStageDurations: (options?: { startDate?: string; endDate?: string }) => StageDuration[];
   getDealsByMonth: (months: number) => { month: string; value: number; count: number }[];
-  getDealCycleDistribution: () => { name: string; min: number; max: number; count: number; value: number }[];
-  getAverageDealCycle: () => { avgDays: number; medianDays: number; totalCount: number };
+  getDealCycleDistribution: (options?: { startDate?: string; endDate?: string }) => { name: string; min: number; max: number; count: number; value: number }[];
+  getAverageDealCycle: (options?: { startDate?: string; endDate?: string }) => { avgDays: number; medianDays: number; totalCount: number };
   resetToMock: () => void;
 }
 
@@ -182,10 +182,6 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       ),
       stageHistories: [...state.stageHistories, newHistory],
     }));
-
-    if (newStage === 'won') {
-      useGoalStore.getState().addDealAmount(lead.ownerId, now, lead.value);
-    }
   },
 
   addCommunication: (leadId, type, content) => {
@@ -213,8 +209,12 @@ export const useLeadStore = create<LeadState>((set, get) => ({
   },
 
   convertToCustomer: (leadId) => {
-    const lead = get().leads.find(l => l.id === leadId);
+    const { customers, leads } = get();
+    const lead = leads.find(l => l.id === leadId);
     if (!lead) return;
+
+    const alreadyConverted = customers.some(c => c.leadId === leadId);
+    if (alreadyConverted) return;
 
     const now = formatISO(new Date());
     const newCustomer: Customer = {
@@ -331,13 +331,23 @@ export const useLeadStore = create<LeadState>((set, get) => ({
     });
   },
 
-  getFunnelData: () => {
+  getFunnelData: (options?: { startDate?: string; endDate?: string }) => {
     const { leads } = get();
     const result: FunnelData[] = [];
     let prevCount = 0;
 
+    const startDate = options?.startDate ? new Date(options.startDate) : null;
+    const endDate = options?.endDate ? new Date(options.endDate) : null;
+
+    const filteredLeads = leads.filter(lead => {
+      const createdAt = new Date(lead.createdAt);
+      if (startDate && createdAt < startDate) return false;
+      if (endDate && createdAt > endDate) return false;
+      return true;
+    });
+
     STAGE_ORDER.forEach((stage, index) => {
-      const stageLeads = leads.filter(l => l.stage === stage);
+      const stageLeads = filteredLeads.filter(l => l.stage === stage);
       const count = stageLeads.length;
       const value = stageLeads.reduce((sum, l) => sum + l.value, 0);
       const conversionRate = index === 0 ? 100 : prevCount > 0 ? (count / prevCount) * 100 : 0;
@@ -358,77 +368,84 @@ export const useLeadStore = create<LeadState>((set, get) => ({
     return result;
   },
 
-  getStageDurations: () => {
+  getStageDurations: (options?: { startDate?: string; endDate?: string }) => {
     const { stageHistories, leads } = get();
     const result: StageDuration[] = [];
-
     const activeStages: LeadStage[] = ['initial', 'requirement', 'proposal', 'negotiation'];
     const now = new Date();
+    const endDate = options?.endDate ? new Date(options.endDate) : now;
+    const startDate = options?.startDate ? new Date(options.startDate) : null;
 
-    activeStages.forEach(stage => {
-      const perLeadDurations: number[] = [];
+    const getLeadStageDurations = (leadId: string): Record<string, number> => {
+      const lead = leads.find(l => l.id === leadId);
+      if (!lead) return {};
 
-      leads.forEach(lead => {
-        const leadHistories = stageHistories
-          .filter(s => s.leadId === lead.id)
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      const histories = stageHistories
+        .filter(s => s.leadId === leadId)
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-        const enterStage = leadHistories.find(s => s.toStage === stage);
-        const stageIndex = STAGE_ORDER.indexOf(stage);
-        const nextStage = STAGE_ORDER.slice(stageIndex + 1).find(s => s !== 'lost');
+      const durations: Record<string, number> = {};
+      let currentStage: LeadStage = 'initial';
+      let currentEnterTime = new Date(lead.createdAt);
 
-        const exitStage = nextStage
-          ? leadHistories.find(s => s.toStage === nextStage || s.toStage === 'lost')
-          : undefined;
-
-        let duration: number | undefined = undefined;
-        if (enterStage) {
-          if (exitStage) {
-            duration = differenceInDays(new Date(exitStage.createdAt), new Date(enterStage.createdAt));
-          } else if (lead.stage === stage) {
-            duration = differenceInDays(now, new Date(enterStage.createdAt));
-          }
+      histories.forEach(history => {
+        const exitTime = new Date(history.createdAt);
+        let duration = differenceInDays(exitTime, currentEnterTime);
+        if (startDate) {
+          const effectiveEnter = currentEnterTime > startDate ? currentEnterTime : startDate;
+          duration = differenceInDays(exitTime, effectiveEnter);
         }
+        if (duration < 0) duration = 0;
 
-        if (duration !== undefined && duration >= 0) {
-          perLeadDurations.push(duration);
-        }
+        if (!durations[currentStage]) durations[currentStage] = 0;
+        durations[currentStage] += duration;
+
+        currentStage = history.toStage as LeadStage;
+        currentEnterTime = exitTime;
       });
 
-      const fromHistories = stageHistories
-        .filter(s => s.toStage === stage && s.durationDays !== undefined)
-        .map(s => s.durationDays as number);
+      if (activeStages.includes(currentStage)) {
+        const exitTime = endDate < now ? endDate : now;
+        let duration = differenceInDays(exitTime, currentEnterTime);
+        if (startDate) {
+          const effectiveEnter = currentEnterTime > startDate ? currentEnterTime : startDate;
+          duration = differenceInDays(exitTime, effectiveEnter);
+        }
+        if (duration < 0) duration = 0;
+        if (!durations[currentStage]) durations[currentStage] = 0;
+        durations[currentStage] += duration;
+      }
 
-      const allDurations = [...perLeadDurations, ...fromHistories];
+      return durations;
+    };
+
+    activeStages.forEach(stage => {
+      const allDurations: number[] = [];
+
+      leads.forEach(lead => {
+        if (startDate && new Date(lead.createdAt) > endDate) return;
+        const leadDurations = getLeadStageDurations(lead.id);
+        if (leadDurations[stage] !== undefined && leadDurations[stage] >= 0) {
+          allDurations.push(leadDurations[stage]);
+        }
+      });
 
       if (allDurations.length > 0) {
         const avgDays = Math.round(allDurations.reduce((a, b) => a + b, 0) / allDurations.length * 10) / 10;
         const minDays = Math.min(...allDurations);
         const maxDays = Math.max(...allDurations);
 
-        result.push({
-          stage,
-          stageName: STAGE_CONFIG[stage].name,
-          avgDays,
-          minDays,
-          maxDays,
-        });
+        result.push({ stage, stageName: STAGE_CONFIG[stage].name, avgDays, minDays, maxDays });
       } else {
-        result.push({
-          stage,
-          stageName: STAGE_CONFIG[stage].name,
-          avgDays: 0,
-          minDays: 0,
-          maxDays: 0,
-        });
+        result.push({ stage, stageName: STAGE_CONFIG[stage].name, avgDays: 0, minDays: 0, maxDays: 0 });
       }
     });
 
     return result;
   },
 
-  getDealCycleDistribution: () => {
-    const { leads, stageHistories } = get();
+  getDealCycleDistribution: (options?: { startDate?: string; endDate?: string }) => {
+    const { leads, stageHistories, customers } = get();
     const buckets = [
       { name: '0-7天', min: 0, max: 7, count: 0, value: 0 },
       { name: '8-14天', min: 8, max: 14, count: 0, value: 0 },
@@ -438,59 +455,86 @@ export const useLeadStore = create<LeadState>((set, get) => ({
       { name: '90天以上', min: 91, max: Infinity, count: 0, value: 0 },
     ];
 
-    leads.filter(l => l.stage === 'won').forEach(lead => {
-      const wonHistory = stageHistories
-        .filter(s => s.leadId === lead.id && s.toStage === 'won')
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    const dealInfos: { dealDate: Date; leadCreatedAt: Date; value: number }[] = [];
 
-      const endDate = wonHistory ? new Date(wonHistory.createdAt) : new Date(lead.updatedAt);
-      const startDate = new Date(lead.createdAt);
-      const totalDays = differenceInDays(endDate, startDate);
-
-      const bucket = buckets.find(b => totalDays >= b.min && totalDays <= b.max);
-      if (bucket) {
-        bucket.count++;
-        bucket.value += lead.value;
-      }
+    customers.forEach(customer => {
+      const lead = leads.find(l => l.id === customer.leadId);
+      if (!lead) return;
+      dealInfos.push({
+        dealDate: new Date(customer.dealDate),
+        leadCreatedAt: new Date(lead.createdAt),
+        value: customer.dealValue,
+      });
     });
 
-    const wonLeads = leads.filter(l => l.stage === 'won');
-    const wonStageHistories = stageHistories.filter(s => s.toStage === 'won');
+    stageHistories
+      .filter(s => s.toStage === 'won')
+      .forEach(sh => {
+        const hasCustomer = customers.some(c => c.leadId === sh.leadId);
+        if (hasCustomer) return;
+        const lead = leads.find(l => l.id === sh.leadId);
+        if (!lead) return;
+        dealInfos.push({
+          dealDate: new Date(sh.createdAt),
+          leadCreatedAt: new Date(lead.createdAt),
+          value: lead.value,
+        });
+      });
 
-    wonStageHistories.forEach(sh => {
-      if (wonLeads.find(l => l.id === sh.leadId)) return;
-      const lead = leads.find(l => l.id === sh.leadId);
-      if (!lead) return;
-      const totalDays = differenceInDays(new Date(sh.createdAt), new Date(lead.createdAt));
+    const startDate = options?.startDate ? new Date(options.startDate) : null;
+    const endDate = options?.endDate ? new Date(options.endDate) : null;
+
+    dealInfos.forEach(info => {
+      if (startDate && info.dealDate < startDate) return;
+      if (endDate && info.dealDate > endDate) return;
+
+      const totalDays = differenceInDays(info.dealDate, info.leadCreatedAt);
       const bucket = buckets.find(b => totalDays >= b.min && totalDays <= b.max);
       if (bucket) {
         bucket.count++;
-        bucket.value += lead.value;
+        bucket.value += info.value;
       }
     });
 
     return buckets;
   },
 
-  getAverageDealCycle: () => {
-    const { leads, stageHistories } = get();
+  getAverageDealCycle: (options?: { startDate?: string; endDate?: string }) => {
+    const { leads, stageHistories, customers } = get();
     const cycles: number[] = [];
 
-    const wonStageHistories = stageHistories.filter(s => s.toStage === 'won');
-    wonStageHistories.forEach(sh => {
-      const lead = leads.find(l => l.id === sh.leadId);
-      if (lead) {
-        const days = differenceInDays(new Date(sh.createdAt), new Date(lead.createdAt));
-        if (days > 0) cycles.push(days);
-      }
+    const dealInfos: { dealDate: Date; leadCreatedAt: Date }[] = [];
+
+    customers.forEach(customer => {
+      const lead = leads.find(l => l.id === customer.leadId);
+      if (!lead) return;
+      dealInfos.push({
+        dealDate: new Date(customer.dealDate),
+        leadCreatedAt: new Date(lead.createdAt),
+      });
     });
 
-    leads.filter(l => l.stage === 'won').forEach(lead => {
-      const hasHistory = wonStageHistories.some(s => s.leadId === lead.id);
-      if (!hasHistory) {
-        const days = differenceInDays(new Date(lead.updatedAt), new Date(lead.createdAt));
-        if (days > 0) cycles.push(days);
-      }
+    stageHistories
+      .filter(s => s.toStage === 'won')
+      .forEach(sh => {
+        const hasCustomer = customers.some(c => c.leadId === sh.leadId);
+        if (hasCustomer) return;
+        const lead = leads.find(l => l.id === sh.leadId);
+        if (!lead) return;
+        dealInfos.push({
+          dealDate: new Date(sh.createdAt),
+          leadCreatedAt: new Date(lead.createdAt),
+        });
+      });
+
+    const startDate = options?.startDate ? new Date(options.startDate) : null;
+    const endDate = options?.endDate ? new Date(options.endDate) : null;
+
+    dealInfos.forEach(info => {
+      if (startDate && info.dealDate < startDate) return;
+      if (endDate && info.dealDate > endDate) return;
+      const days = differenceInDays(info.dealDate, info.leadCreatedAt);
+      if (days > 0) cycles.push(days);
     });
 
     if (cycles.length === 0) return { avgDays: 0, medianDays: 0, totalCount: 0 };
