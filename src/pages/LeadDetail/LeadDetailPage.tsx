@@ -33,6 +33,7 @@ export function LeadDetailPage() {
   const lead = useLeadStore(state => state.getLeadById(id || ''));
   const communications = useLeadStore(state => state.getCommunicationsByLeadId(id || ''));
   const stageHistories = useLeadStore(state => state.getStageHistoriesByLeadId(id || ''));
+  const existingCustomer = useLeadStore(state => state.getCustomerByLeadId(id || ''));
   const updateLeadStage = useLeadStore(state => state.updateLeadStage);
   const addCommunication = useLeadStore(state => state.addCommunication);
   const convertToCustomer = useLeadStore(state => state.convertToCustomer);
@@ -147,7 +148,16 @@ export function LeadDetailPage() {
                 标记流失
               </button>
             )}
-            {lead.stage === 'won' && (
+            {lead.stage === 'won' && existingCustomer && (
+              <button
+                onClick={() => navigate('/customers')}
+                className="btn bg-success-100 text-success-700 hover:bg-success-200 border border-success-200"
+              >
+                <CheckCircle2 className="w-4 h-4 mr-2" />
+                已生成客户档案
+              </button>
+            )}
+            {lead.stage === 'won' && !existingCustomer && (
               <button
                 onClick={handleConvertToCustomer}
                 className="btn bg-success-600 text-white hover:bg-success-700"

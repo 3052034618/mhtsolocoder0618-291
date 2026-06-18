@@ -1,7 +1,8 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Search, Building2, Phone, Mail, User, Calendar, DollarSign, X,
-  Clock, TrendingUp, History, CheckCircle2,
+  Clock, TrendingUp, History, CheckCircle2, ArrowRight, ExternalLink,
 } from 'lucide-react';
 import { useLeadStore } from '@/store/useLeadStore';
 import { useUserStore } from '@/store/useUserStore';
@@ -9,6 +10,7 @@ import { Customer, SOURCE_CONFIG, STAGE_CONFIG, COMMUNICATION_CONFIG, Communicat
 import { formatCurrency, formatDate, formatRelativeTime } from '@/utils/format';
 
 export function CustomersPage() {
+  const navigate = useNavigate();
   const customers = useLeadStore(state => state.customers);
   const getCommunicationsByLeadId = useLeadStore(state => state.getCommunicationsByLeadId);
   const getStageHistoriesByLeadId = useLeadStore(state => state.getStageHistoriesByLeadId);
@@ -183,6 +185,18 @@ export function CustomersPage() {
                     </div>
                   </div>
                 </div>
+                <button
+                  onClick={() => {
+                    if (selectedCustomer?.leadId) {
+                      setSelectedCustomer(null);
+                      navigate(`/lead/${selectedCustomer.leadId}`);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-white/90 text-sm font-medium backdrop-blur-sm transition-colors"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  查看原线索
+                </button>
                 <button
                   onClick={() => setSelectedCustomer(null)}
                   className="p-2 rounded-xl hover:bg-white/10 text-white/70 hover:text-white transition-colors"
